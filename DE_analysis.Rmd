@@ -1,0 +1,615 @@
+---
+title: "Spleen Stimulation - pneumococcus"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+<!-- basedir <- "C:/Users/Isabelle/Documents/PROJECTS/Spleen" -->
+<!-- setwd(basedir) -->
+
+
+```{r}
+rm(list = ls())
+pkgs <- c('dplyr','data.table','mixOmics','reshape2','tidyr','DESeq2','tmod', "tidyverse", "edgeR")
+sum(unlist(lapply(pkgs, require,character.only = T))) == length(pkgs)
+
+convert.mmGeneList <- function(x){
+  
+  require("biomaRt")
+  human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+  mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  
+  genesV2 = getLDS(attributes = c("mgi_symbol"), values = x , mart = mouse, attributesL = c("hgnc_symbol"), martL = human, uniqueRows=T)
+  
+  return(genesV2)
+}
+
+"%ni%" <- Negate("%in%")
+```
+
+```{r}
+basedir <- "C:/Users/Isabelle/Documents/PROJECTS/Spleen"
+setwd(basedir)
+
+# Read tables
+countdata <- read.csv2('Data/Mouse_counts_20191024.csv', row.names = 1)
+descript <- read.csv2('Data/Mouse_desc_20191024.csv')
+
+# Create group
+descript$Group <- factor(paste(descript$Vivo, descript$Vitro, sep="_"))
+
+# Check samples and row/column names
+rownames(descript) <- paste0("X", descript$Sample.Name)
+common.samples <- intersect(colnames(countdata), rownames(descript))
+table(colnames(countdata) == rownames(descript))
+setdiff(colnames(countdata), rownames(descript)) #"X6_2_.NS"
+setdiff(rownames(descript), colnames(countdata)) #"X6_2_NS"
+colnames(countdata) <- gsub("X6_2_.NS", "X6_2_NS", colnames(countdata))
+identical(colnames(countdata), rownames(descript))
+rnames <- rownames(countdata)
+countdata <- varianceStabilizingTransformation(as.matrix(countdata))
+rownames(countdata) <- rnames
+
+# Pre process
+descript$Sample.Name <- gsub("T", "S", descript$Sample.Name)
+descript$Vitro <- gsub("T", "S", descript$Vitro)
+colnames(countdata) <- gsub("T", "S", colnames(countdata))
+descript$Group <- factor(paste(descript$Vivo, descript$Vitro, sep="_"))
+##
+descript$Group <- paste0(descript$Group, "_", descript$Time.point)
+##
+descript$Group <- gsub("NI_NS_0", "Baseline", descript$Group)
+descript$Group <- gsub("NI_S_0", "stim_Baseline", descript$Group)
+descript$Group <- gsub("I_NS_1", "Early_time_points", descript$Group)
+descript$Group <- gsub("I_NS_2", "Early_time_points", descript$Group)
+descript$Group <- gsub("I_NS_4", "Late_time_points", descript$Group)
+descript$Group <- gsub("I_NS_7", "Late_time_points", descript$Group)
+descript$Group <- gsub("I_S_1", "stim_Early_time_points", descript$Group)
+descript$Group <- gsub("I_S_2", "stim_Early_time_points", descript$Group)
+descript$Group <- gsub("I_S_4", "stim_Late_time_points", descript$Group)
+descript$Group <- gsub("I_S_7", "stim_Late_time_points", descript$Group)
+
+```
+
+
+```{r}
+# PCA mixomics
+pc <-  t(countdata)
+pca.res <- pca(pc, ncomp =10)
+barplot(pca.res$prop_expl_var$X)
+#pdf("Figures/PCA_all.pdf", width = 8, height = 6)
+plotIndiv(pca.res, comp = c(1,2), group = descript$Group, ind.names = descript$Sample.Name,           legend = T, title = "PCA", ellipse = T)
+#dev.off()
+```
+
+
+```{r}
+# IPCA mixomics
+ipca.res <- ipca(pc, ncomp = 4, mode="deflation", )
+barplot(ipca.res$kurtosis)
+#pdf("Figures/IPCA_all.pdf", width = 8, height = 6)
+plotIndiv(ipca.res, comp = c(1,2), group = descript$Group, ind.names = descript$Sample.Name, 
+          legend = T, title = "IPCA", ellipse = T)
+#dev.off()
+```
+
+```{r}
+# Analysis removing outlier
+countdata <- read.csv2('Data/Mouse_counts_20191024.csv', row.names = 1)
+descript <- read.csv2('Data/Mouse_desc_20191024.csv')
+descript$Group <- factor(paste(descript$Vivo, descript$Vitro, sep="_"))
+
+rownames(descript) <- paste0("X", descript$Sample.Name)
+common.samples <- intersect(colnames(countdata), rownames(descript))
+table(colnames(countdata) == rownames(descript))
+setdiff(colnames(countdata), rownames(descript)) #"X6_2_.NS"
+setdiff(rownames(descript), colnames(countdata)) #"X6_2_NS"
+colnames(countdata) <- gsub("X6_2_.NS", "X6_2_NS", colnames(countdata))
+identical(colnames(countdata), rownames(descript))
+```
+
+
+```{r}
+# Remove outliers from descript table
+remove <- c("X1_6_NS")
+descript_clean <- descript[setdiff(rownames(descript), remove),]
+nrow(descript_clean)
+
+# Check
+setdiff(colnames(countdata), rownames(descript_clean)) # "X1_6_NS"
+setdiff(rownames(descript_clean), colnames(countdata)) # 0
+
+# Remove outliers from countdata table
+common.samples <- intersect(colnames(countdata), rownames(descript_clean))
+countdata_clean <- countdata[, common.samples]
+identical(colnames(countdata_clean), rownames(descript_clean))
+```
+
+```{r}
+descript_clean$Group <- paste0(descript_clean$Group, "_", descript_clean$Time.point)
+descript_clean$Group <- gsub("NI_NS_0", "Baseline", descript_clean$Group)
+descript_clean$Group <- gsub("NI_T_0", "stim_Baseline", descript_clean$Group)
+descript_clean$Group <- gsub("I_NS_1", "Early_time_points", descript_clean$Group)
+descript_clean$Group <- gsub("I_NS_2", "Early_time_points", descript_clean$Group)
+descript_clean$Group <- gsub("I_NS_4", "Late_time_points", descript_clean$Group)
+descript_clean$Group <- gsub("I_NS_7", "Late_time_points", descript_clean$Group)
+descript_clean$Group <- gsub("I_T_1", "stim_Early_time_points", descript_clean$Group)
+descript_clean$Group <- gsub("I_T_2", "stim_Early_time_points", descript_clean$Group)
+descript_clean$Group <- gsub("I_T_4", "stim_Late_time_points", descript_clean$Group)
+descript_clean$Group <- gsub("I_T_7", "stim_Late_time_points", descript_clean$Group)
+
+# Normalize and transform
+rnames <- rownames(countdata_clean)
+countdata_clean <- varianceStabilizingTransformation(as.matrix(countdata_clean))
+rownames(countdata_clean) <- rnames
+
+```
+
+
+```{r}
+# New PCA
+pc_n <-  t(countdata_clean)
+pca.res <- pca(pc_n, ncomp =10)
+barplot(pca.res$prop_expl_var$X)
+plotIndiv(pca.res, comp = c(1,2), group = descript_clean$Group, ind.names = descript_clean$Time.point, 
+          legend = T, title = "PCA", ellipse = T)
+```
+
+
+```{r}
+# New IPCA
+ipca.res <- ipca(pc_n, ncomp = 4, mode="deflation", )
+barplot(ipca.res$kurtosis)
+#pdf(file = "Figures/Paper/IPCA_mixomcs.pdf", width = 9, height = 6)
+plotIndiv(ipca.res, comp = c(1,2), group = descript_clean$Group, ind.names = descript_clean$Time.point, 
+          legend = T, title = "IPCA", ellipse = T)
+#dev.off()
+```
+
+
+```{r}
+# sparse IPCA mixomics
+sipca.res <- sipca(pc_n, ncomp = 4, mode="deflation")
+barplot(ipca.res$kurtosis)
+#pdf(file = "Figures/Paper/sIPCA_mixomcs.pdf", width = 7, height = 4)
+plotIndiv(sipca.res, comp = c(1,2), group = descript_clean$Group, ind.names = descript_clean$Time.point, 
+          legend = T, title = "sIPCA", ellipse = T)
+#dev.off()
+```
+
+
+```{r}
+## Heatmap positively correlated genes
+
+# Select genes correlated with the first component (positive - non stimulated cluster)
+rotat <- as.data.frame(sipca.res$rotation)
+rotat <- rotat[which(rotat$V1 > 0),]
+#View(rotat)
+rotat <- rotat[order(rotat$V1, decreasing = TRUE),]
+genes <- rownames(rotat)
+
+cp <- as.data.frame(countdata_clean)
+cp$genes <- rownames(cp)
+
+genes_sipca <- genes
+cp <- cp[cp$genes %in% genes_sipca, ]
+rownames(cp) <- cp$genes
+cp$genes <- NULL
+#View(cp)
+
+descript_clean <- descript_clean[order(descript_clean$Vitro, descript_clean$Time.point),]
+descript_clean$Vitro <- gsub("T", "S", descript_clean$Vitro)
+descript_clean$In_vitro <- descript_clean$Vitro
+descript_clean$In_vivo <- descript_clean$Vivo
+pheno <- descript_clean[,c("Group", "In_vitro")]
+
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+
+col_fun = colorRamp2(c(6,10,14), c("#0099CC", "white", "#FF6666")) # "#0099CC", #FFFCCC, "#FF6666"
+
+#pdf("Figures/heatmap_deseq2_positive.pdf", width = 6, height = 6)
+Heatmap(cp, cluster_columns = FALSE, col = col_fun, column_km = 2)
+#dev.off()
+
+```
+
+```{r}
+## Heatmap negatively correlated genes
+
+# Select genes correlated with the first component (negative - stimulated cluster)
+rotat <- as.data.frame(sipca.res$rotation)
+rotat <- rotat[which(rotat$V1 < 0),]
+rotat <- rotat[order(rotat$V1, decreasing = TRUE),]
+genes <- rownames(rotat)
+
+cp <- as.data.frame(countdata_clean)
+cp$genes <- rownames(cp)
+
+genes_sipca <- genes
+cp <- cp[cp$genes %in% genes_sipca, ]
+rownames(cp) <- cp$genes
+cp$genes <- NULL
+
+descript_clean <- descript_clean[order(descript_clean$Vitro, descript_clean$Time.point),]
+descript_clean$Vitro <- gsub("T", "S", descript_clean$Vitro)
+descript_clean$In_vitro <- descript_clean$Vitro
+descript_clean$In_vivo <- descript_clean$Vivo
+pheno <- descript_clean[,c("Group", "In_vitro")]
+
+col_fun = colorRamp2(c(6,10,14), c("#0099CC", "white", "#FF6666")) # "#0099CC", #FFFCCC, "#FF6666"
+
+#pdf("Figures/heatmap_deseq2_negative.pdf", width = 6, height = 6)
+Heatmap(cp, cluster_columns = FALSE, col = col_fun, column_km = 2)
+#dev.off()
+```
+
+
+DEG ANALYSIS
+
+```{r}
+countdata <- read.csv2('Data/Mouse_counts_20191024.csv', row.names = 1)
+descript <- read.csv2('Data/Mouse_desc_20191024.csv')
+
+# Create group
+descript$Group <- factor(paste(descript$Vivo, descript$Vitro, sep="_"))
+
+# Check samples and row/column names
+rownames(descript) <- paste0("X", descript$Sample.Name)
+common.samples <- intersect(colnames(countdata), rownames(descript))
+table(colnames(countdata) == rownames(descript))
+setdiff(colnames(countdata), rownames(descript)) #"X6_2_.NS"
+setdiff(rownames(descript), colnames(countdata)) #"X6_2_NS"
+colnames(countdata) <- gsub("X6_2_.NS", "X6_2_NS", colnames(countdata))
+identical(colnames(countdata), rownames(descript))
+
+# Remove outliers from descript table
+remove <- c("X1_6_NS") 
+descript_clean <- descript[setdiff(rownames(descript), remove),]
+nrow(descript_clean)
+
+common.samples <- intersect(colnames(countdata), rownames(descript_clean))
+countdata_clean <- countdata[, common.samples]
+identical(colnames(countdata_clean), rownames(descript_clean))
+
+descript_clean$Group <- paste0(descript_clean$Group, "_", descript_clean$Time.point)
+#View(descript_clean)
+```
+
+```{r}
+Group <- descript_clean$Group
+
+dds <- DESeqDataSetFromMatrix(countdata_clean, descript_clean, design = ~Group)
+dds$Group <- relevel(dds$Group, "NI_NS_0" )
+
+minCount = 1
+high <- assay(dds) > minCount
+idx <- (rowSums(high)/ncol(dds)) == 1 
+dds <- dds[which(idx),]
+nrow(dds) # 10757
+#View(counts(dds))
+
+dds <- DESeq(dds, quiet = T)
+resultsNames(dds)
+
+```
+
+
+```{r}
+#library(tidyverse)
+
+result <- resultsNames(dds) 
+out_dir <- "Results/DESeq2"
+#dir.create(out_dir)
+
+for (result.name in result[-1]) {
+  res.table <- results(dds, name=result.name) %>% 
+    as.data.frame %>% rownames_to_column("Genes")
+  write.table(x = res.table, file.path(out_dir, paste0(result.name, ".txt")), sep = "\t",
+              row.names = FALSE, quote = F)
+}
+
+```
+
+```{r}
+A1 <- read.delim("Results/DESeq2/Group_I_NS_1_vs_NI_NS_0.txt")
+A2 <- read.delim("Results/DESeq2/Group_I_NS_2_vs_NI_NS_0.txt")
+A4 <- read.delim("Results/DESeq2/Group_I_NS_4_vs_NI_NS_0.txt")
+A7 <- read.delim("Results/DESeq2/Group_I_NS_7_vs_NI_NS_0.txt")
+B0 <- read.delim("Results/DESeq2/Group_NI_T_0_vs_NI_NS_0.txt")
+E1 <- read.delim("Results/DESeq2/Group_I_T_1_vs_NI_NS_0.txt")
+E2 <- read.delim("Results/DESeq2/Group_I_T_2_vs_NI_NS_0.txt")
+E4 <- read.delim("Results/DESeq2/Group_I_T_4_vs_NI_NS_0.txt")
+E7 <- read.delim("Results/DESeq2/Group_I_T_7_vs_NI_NS_0.txt")
+
+identical(A1$Genes,E7$Genes) # TRUE
+#hsGenes <- convert.mmGeneList(A1$Genes)
+#View(A7)
+```
+
+
+```{r}
+## Define background genes
+bg <- as.data.frame(rownames(countdata))
+colnames(bg) <- "Genes"
+
+# Transform into human gene symbols
+genes <- convert.mmGeneList(bg$Genes)
+#View(genes)
+bg <- genes
+
+# Remove duplicated
+bg <- subset(bg, !duplicated(bg$HGNC.symbol))
+
+```
+
+
+```{r}
+hsGenes <- convert.mmGeneList(as.matrix(A1$Genes))
+A1_H <- inner_join(hsGenes, as.data.frame(A1), by=c("MGI.symbol"="Genes"))
+index_A1 <- order(abs(A1_H$padj), decreasing = F)
+A1_H <- A1_H[index_A1,] # order by FDR
+A1_H <- subset(A1_H, !duplicated(A1_H$HGNC.symbol))
+A1_filt <- A1_H[which(A1_H$padj < 0.05 & abs(A1_H$log2FoldChange) > .5),]
+A1_m <- tmodHGtest(fg = A1_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+# write.csv2(A1_m, "Results/DESeq2/Modules/A1_final.csv")
+# A1_m$Day <- "Day 1"
+# A1_m$Comparison <- "Infected"
+
+A2_H <- inner_join(hsGenes, as.data.frame(A2), by=c("MGI.symbol"="Genes"))
+index_A2 <- order(abs(A2_H$padj), decreasing = F)
+A2_H <- A2_H[index_A2,] # order by FDR
+A2_H <- subset(A2_H, !duplicated(A2_H$HGNC.symbol))
+A2_filt <- A2_H[which(A2_H$padj < 0.05 & abs(A2_H$log2FoldChange) > .5),]
+A2_m <- tmodHGtest(fg = A2_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+# write.csv2(A2_m, "Results/DESeq2/Modules/A2_final.csv")
+# A2_m$Day <- "Day 2"
+# A2_m$Comparison <- "Infected"
+
+A4_H <- inner_join(hsGenes, as.data.frame(A4), by=c("MGI.symbol"="Genes"))
+index_A4 <- order(abs(A4_H$padj), decreasing = F)
+A4_H <- A4_H[index_A4,] # order by FDR
+A4_H <- subset(A4_H, !duplicated(A4_H$HGNC.symbol))
+A4_filt <- A4_H[which(A4_H$padj < 0.05 & abs(A4_H$log2FoldChange) > .5),]
+A4_m <- tmodHGtest(fg = A4_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+#View(A4_m)
+# write.csv2(A4_m, "Results/DESeq2/Modules/A4_final.csv")
+# A4_m$Day <- "Day 4"
+# A4_m$Comparison <- "Infected"
+
+A7_H <- inner_join(hsGenes, as.data.frame(A7), by=c("MGI.symbol"="Genes"))
+index_A7 <- order(abs(A7_H$padj), decreasing = F)
+A7_H <- A7_H[index_A7,] # order by FDR
+A7_H <- subset(A7_H, !duplicated(A7_H$HGNC.symbol))
+A7_filt <- A7_H[which(A7_H$padj < 0.05 & abs(A7_H$log2FoldChange) > .5),]
+A7_m <- tmodHGtest(fg = A7_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+# write.csv2(A7_m, "Results/DESeq2/Modules/A7_final.csv")
+# A7_m$Day <- "Day 7"
+# A7_m$Comparison <- "Infected"
+
+##
+B0_H <- inner_join(hsGenes, as.data.frame(B0), by=c("MGI.symbol"="Genes"))
+index_B0 <- order(abs(B0_H$padj), decreasing = F)
+B0_H <- B0_H[index_B0,] # order by FDR
+B0_H <- subset(B0_H, !duplicated(B0_H$HGNC.symbol))
+B0_filt <- B0_H[which(B0_H$padj < 0.05 & abs(B0_H$log2FoldChange) > .5),]
+B0_m <- tmodHGtest(fg = B0_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+# write.csv2(B0_m, "Results/DESeq2/Modules/B0_final.csv")
+# B0_m$Day <- "Day 0"
+# B0_m$Comparison <- "Stimulated"
+
+##
+E1_H <- inner_join(hsGenes, as.data.frame(E1), by=c("MGI.symbol"="Genes"))
+index_E1 <- order(abs(E1_H$padj), decreasing = F)
+E1_H <- E1_H[index_E1,] # order by FDR
+E1_H <- subset(E1_H, !duplicated(E1_H$HGNC.symbol))
+E1_filt <- E1_H[which(E1_H$padj < 0.05 & abs(E1_H$log2FoldChange) > .5),]
+E1_m <- tmodHGtest(fg = E1_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+# write.csv2(E1_m, "Results/DESeq2/Modules/E1_final.csv")
+# E1_m$Day <- "Day 1"
+# E1_m$Comparison <- "Infected and Stimulated"
+
+E2_H <- inner_join(hsGenes, as.data.frame(E2), by=c("MGI.symbol"="Genes")) 
+index_E2 <- order(abs(E2_H$padj), decreasing = F)
+E2_H <- E2_H[index_E2,]
+E2_H <- subset(E2_H, !duplicated(E2_H$HGNC.symbol))
+E2_filt <- E2_H[which(E2_H$padj < 0.05 & abs(E2_H$log2FoldChange) > .5),]
+E2_m <- tmodHGtest(fg = E2_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+# write.csv2(E2_m, "Results/DESeq2/Modules/E2_final.csv")
+# E2_m$Day <- "Day 2"
+# E2_m$Comparison <- "Infected and Stimulated"
+
+E4_H <- inner_join(hsGenes, as.data.frame(E4), by=c("MGI.symbol"="Genes"))
+index_E4 <- order(abs(E4_H$padj), decreasing = F)
+E4_H <- E4_H[index_E4,] # order by FDR
+E4_H <- subset(E4_H, !duplicated(E4_H$HGNC.symbol))
+E4_filt <- E4_H[which(E4_H$padj < 0.05 & abs(E4_H$log2FoldChange) > .5),]
+E4_m <- tmodHGtest(fg = E4_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+# write.csv2(E4_m, "Results/DESeq2/Modules/E4_final.csv")
+# E4_m$Day <- "Day 4"
+# E4_m$Comparison <- "Infected and Stimulated"
+
+E7_H <- inner_join(hsGenes, as.data.frame(E7), by=c("MGI.symbol"="Genes"))
+index_E7 <- order(abs(E7_H$padj), decreasing = F)
+E7_H <- E7_H[index_E7,] # order by FDR
+E7_H <- subset(E7_H, !duplicated(E7_H$HGNC.symbol))
+E7_filt <- E7_H[which(E7_H$padj < 0.05 & abs(E7_H$log2FoldChange) > .5),]
+E7_m <- tmodHGtest(fg = E7_filt$HGNC.symbol, bg = bg$HGNC.symbol)
+# write.csv2(E7_m, "Results/DESeq2/Modules/E7_final.csv")
+# E7_m$Day <- "Day 7"
+# E7_m$Comparison <- "Infected and Stimulated"
+
+
+####
+# All_modules <- rbind(A1_m, A2_m, A4_m, A7_m, B0_m, E1_m, E2_m, E4_m, E7_m)
+# View(All_modules)
+# write.csv2(All_modules, "Results/Modules/All_modules.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+remove <- c("LI.M139", "LI.M11.1", "LI.M87", "LI.M8", "LI.M209", "LI.M0", "LI.M4.12", "LI.M94", "LI.M155",
+            "LI.M89.1", "LI.M89.0", "LI.M37.2", "LI.M134", "LI.M238", "LI.M124", "LI.M3")
+
+
+innate <- c("LI.M132","LI.M7.2","LI.M68","LI.M160","LI.M39","LI.M13", "LI.M111.0","LI.M11.2","LI.M118.1",
+            "LI.M81","LI.M75","LI.M163","LI.M150","LI.M118.0","LI.S4","LI.M23","LI.M33","LI.M37.0", 
+            "LI.M11.0","LI.M16","LI.M37.1") # 21 modules
+
+dcs <- c("LI.M43.1","LI.M86.1","LI.M40","LI.S11","LI.M5.0","LI.S5","LI.M95.0","LI.M146","LI.M95.1",
+         "LI.S10","LI.M43.0","LI.M64") # 12 modules
+
+adaptive <- c("LI.M7.0","LI.M4.5","LI.M19","LI.M36","LI.M57","LI.S0","LI.M7.3","LI.M35.0","LI.M47.1",
+              "LI.M9","LI.M46","LI.M47.0","LI.M4.11") # 13 modules
+
+cell <-  c("LI.M167","LI.M4.7","LI.M103","LI.M4.10","LI.M213","LI.M4.4","LI.M31","LI.M20","LI.M49",
+           "LI.M189","LI.M4.0","LI.M4.1") # 12 modules
+
+cytok <- c("LI.M27.0","LI.M38","LI.M27.1","LI.M86.0","LI.M115","LI.M29","LI.M78") # 7 modules 
+  
+  
+
+tabelas <- list(A1_m, A2_m, A4_m, A7_m, B0_m, E1_m, E2_m, E4_m, E7_m)
+#View(tabelas[[1]])
+
+# firfig <- c(innate, dcs)
+secfig <- c(adaptive, cell, cytok)
+
+check_IDs <- function(x){
+  x <- x[x$ID %in% secfig, ]
+}
+
+results <- lapply(tabelas, check_IDs)
+
+A1_m <- results[[1]]
+A2_m <- results[[2]]
+A4_m <- results[[3]]
+A7_m <- results[[4]]
+B0_m <- results[[5]]
+E1_m <- results[[6]]
+E2_m <- results[[7]]
+E4_m <- results[[8]]
+E7_m <- results[[9]]
+
+```
+
+
+```{r}
+A1_m$E <- A1_m$E/5
+A2_m$E <- A2_m$E/5
+A4_m$E <- A4_m$E/5
+A7_m$E <- A7_m$E/5
+B0_m$E <- B0_m$E/5
+E1_m$E <- E1_m$E/5
+E2_m$E <- E2_m$E/5
+E4_m$E <- E4_m$E/5
+E7_m$E <- E7_m$E/5
+
+colnames(A1_m) <- gsub("E", "AUC", colnames(A1_m))
+colnames(A2_m) <- gsub("E", "AUC", colnames(A2_m))
+colnames(A4_m) <- gsub("E", "AUC", colnames(A4_m))
+colnames(A7_m) <- gsub("E", "AUC", colnames(A7_m))
+colnames(B0_m) <- gsub("E", "AUC", colnames(B0_m))
+colnames(E1_m) <- gsub("E", "AUC", colnames(E1_m))
+colnames(E2_m) <- gsub("E", "AUC", colnames(E2_m))
+colnames(E4_m) <- gsub("E", "AUC", colnames(E4_m))
+colnames(E7_m) <- gsub("E", "AUC", colnames(E7_m))
+```
+
+
+```{r}
+## Plots ####
+
+  pieA1 <- tmodDecideTests(A1_H$HGNC.symbol, lfc=A1_H$log2FoldChange, pval = A1_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  pieA2 <- tmodDecideTests(A2_H$HGNC.symbol, lfc=A2_H$log2FoldChange, pval = A2_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  pieA4 <- tmodDecideTests(A4_H$HGNC.symbol, lfc=A4_H$log2FoldChange, pval = A4_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  pieA7 <- tmodDecideTests(A7_H$HGNC.symbol, lfc=A7_H$log2FoldChange, pval = A7_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  
+  pieB0 <- tmodDecideTests(B0_H$HGNC.symbol, lfc=B0_H$log2FoldChange, pval = B0_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  
+  pieE1 <- tmodDecideTests(E1_H$HGNC.symbol, lfc=E1_H$log2FoldChange, pval = E1_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  pieE2 <- tmodDecideTests(E2_H$HGNC.symbol, lfc=E2_H$log2FoldChange, pval = E2_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  pieE4 <- tmodDecideTests(E4_H$HGNC.symbol, lfc=E4_H$log2FoldChange, pval = E4_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  pieE7 <- tmodDecideTests(E7_H$HGNC.symbol, lfc=E7_H$log2FoldChange, pval = E7_H$padj, 
+                           mset = "LI", pval.thr = 0.05, lfc.thr = 0.5)
+  
+  # View(pieA1$I_D1)
+  # View(pieE1$I_S_D1)
+  # transform in data frame
+  pieA1 <- as.data.frame(pieA1)
+  pieA2 <- as.data.frame(pieA2)
+  pieA4 <- as.data.frame(pieA4)
+  pieA7 <- as.data.frame(pieA7)
+  
+  pieB0 <- as.data.frame(pieB0)
+  
+  pieE1 <- as.data.frame(pieE1)
+  pieE2 <- as.data.frame(pieE2)
+  pieE4 <- as.data.frame(pieE4)
+  pieE7 <- as.data.frame(pieE7)
+  
+  
+  # Remove the X if there is any
+  colnames(pieA1) <- gsub("X.*\\.", "", colnames(pieA1))
+  colnames(pieA2) <- gsub("X.*\\.", "", colnames(pieA2))
+  colnames(pieA4) <- gsub("X.*\\.", "", colnames(pieA4))
+  colnames(pieA7) <- gsub("X.*\\.", "", colnames(pieA7))
+  
+  colnames(pieB0) <- gsub("X.*\\.", "", colnames(pieB0))
+  
+  colnames(pieE1) <- gsub("X.*\\.", "", colnames(pieE1))
+  colnames(pieE2) <- gsub("X.*\\.", "", colnames(pieE2))
+  colnames(pieE4) <- gsub("X.*\\.", "", colnames(pieE4))
+  colnames(pieE7) <- gsub("X.*\\.", "", colnames(pieE7))
+  
+  ##
+  pieA1 <- list("I_D1"=pieA1)
+  pieA2 <- list("I_D2"=pieA2)
+  pieA4 <- list("I_D4"=pieA4)
+  pieA7 <- list("I_D7"=pieA7)
+  
+  pieB0 <- list("S_D0"=pieB0)
+  
+  pieE1 <- list("I_S_D1"=pieE1)
+  pieE2 <- list("I_S_D2"=pieE2)
+  pieE4 <- list("I_S_D4"=pieE4)
+  pieE7 <- list("I_S_D7"=pieE7)
+  
+  ##
+  A1_LI<- list("I_D1"=A1_m)
+  A2_LI<- list("I_D2"=A2_m)
+  A4_LI<- list("I_D4"=A4_m)
+  A7_LI<- list("I_D7"=A7_m)
+  
+  B0_LI <- list("S_D0"=B0_m)
+  
+  E1_LI <- list("I_S_D1"=E1_m)
+  E2_LI <- list("I_S_D2"=E2_m)
+  E4_LI <- list("I_S_D4"=E4_m)
+  E7_LI <- list("I_S_D7"=E7_m)
+  
+  # Create the panels
+    panel_list <- c(A1_LI, A2_LI, A4_LI, A7_LI, B0_LI, E1_LI, E2_LI, E4_LI, E7_LI)
+  is.list(panel_list)
+  pie_list <- c(pieA1, pieA2, pieA4, pieA7, pieB0, pieE1, pieE2, pieE4, pieE7)
+  
+  #x11()
+  #pdf(file = "Figures/Paper/DESeq2_tmod_HG_005_Fig2.pdf", width = 12, height = 18)
+  tmodPanelPlot(panel_list, pval.thr = 0.05, 
+                pval.cutoff= 10^-30, filter.unknown = T, 
+                text.cex =1, clust = "qval", pie =pie_list, pie.style = "pie")
+  #dev.off()
+```
+
+
